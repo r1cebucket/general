@@ -1,24 +1,27 @@
 package server
 
 import (
+	"encoding/json"
 	"hash/adler32"
 	"io"
 	"log"
 	"math/rand"
 	"net"
 	"os"
-	"os/exec"
 	"strconv"
 	"sync"
 	"time"
 
+	"../pkg"
 	pd "../proto"
 	"google.golang.org/protobuf/proto"
 )
 
 type Server struct {
-	ipAddr string
-	port   string
+	ipAddr   string
+	port     string
+	listener net.TCPListener
+	connMap  map[string]net.Conn
 }
 
 type User struct {
@@ -27,23 +30,41 @@ type User struct {
 }
 
 type Poem struct {
-	Strains    []string `json:strains`
-	Author     string   `json:author`
-	Paragraphs []string `json:paragraphs`
-	Title      string   `json:title`
+	Strains    []string `json:"strains"`
+	Author     string   `json:"author"`
+	Paragraphs []string `json:"paragraphs"`
+	Title      string   `json:"title"`
 }
 
 type Author struct {
-	Name string `json:name`
-	Desc string `json:desc`
+	Name string `json:"name"`
+	Desc string `json:"desc"`
 }
 
 var connMutex sync.RWMutex
 
 func Start(port string) {
+	ipAddr := "127.0.0.1"
 	data := ReadData()
-	server := Server{"127.0.0.1", port}
-	listener := server.createListener()
+	tcpAddr := ipAddr + ":" + port
+	addr, err := net.ResolveTCPAddr("tcp", tcpAddr)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	listener, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	server := Server{
+		ipAddr,
+		port,
+		*listener,
+		map[string]net.Conn{},
+	}
+
+	log.Println("Server start at: " + server.port)
 
 	connMap := map[string]net.Conn{}
 	go server.getConnNum(connMap)
@@ -55,8 +76,14 @@ func Start(port string) {
 		}
 
 		go handdleConn(conn, connMap, data)
+		// go readFromConn(conn)
+		// go writeToConn(conn)
 	}
 }
+
+// func trigger (){
+
+// }
 
 // log
 func (s Server) getConnNum(connMap map[string]net.Conn) {
@@ -70,16 +97,6 @@ func (s Server) getConnNum(connMap map[string]net.Conn) {
 		log_file(log_str)
 		time.Sleep(time.Second * 3)
 	}
-}
-
-func getPortConn(port string) string {
-	// netstat -nat|grep -i "8000"|wc -l
-	output, err := exec.Command("/bin/sh", "-c", "netstat -nat|grep -i \""+string(port)+"\"|wc -l").Output()
-	if err != nil {
-		log.Panic(err)
-	}
-	log_str := "port " + string(port) + " TCP connection #:" + string(output)
-	return log_str[:len(log_str)-1]
 }
 
 func log_file(s string) {
@@ -98,54 +115,42 @@ func log_file(s string) {
 }
 
 // function
-func (s Server) createListener() *net.TCPListener {
-	tcpAddr := s.ipAddr + ":" + s.port
-	addr, err := net.ResolveTCPAddr("tcp", tcpAddr)
-	if err != nil {
-		log.Panic(err)
-	}
-
-	listener, err := net.ListenTCP("tcp", addr)
-	if err != nil {
-		log.Panic(err)
-	}
-	log.Println("Server start at: " + s.port)
-	return listener
-}
-
 func handdleConn(conn net.Conn, connMap map[string]net.Conn, data map[string]interface{}) {
 	for {
-		mode := "big"
-		pkgLenByte := make([]byte, 4)
-		_, err := conn.Read(pkgLenByte)
-		if err != nil {
-			log.Println("connection closed")
-			conn.Close()
-			deleteFromMap(connMap, conn)
-			return
-		}
+		// mode := "big"
+		// pkgLenByte := make([]byte, 4)
+		// _, err := conn.Read(pkgLenByte)
+		// if err != nil {
+		// 	log.Println("connection closed")
+		// 	conn.Close()
+		// 	deleteFromMap(connMap, conn)
+		// 	return
+		// }
 
-		pkgLen := Decode(pkgLenByte, mode)
+		// pkgLen := Decode(pkgLenByte, mode)
 
-		byteArr := make([]byte, pkgLen+4)
-		copy(byteArr[:4], pkgLenByte[:])
-		conn.Read(byteArr[4:])
+		// byteArr := make([]byte, pkgLen+4)
+		// copy(byteArr[:4], pkgLenByte[:])
+		// conn.Read(byteArr[4:])
 
-		pkg := Pkg{}
-		pkg.Unpack(byteArr)
+		// pkg := Pkg{}
+		// pkg.Unpack(byteArr)
 
-		handdlePkg(pkg, conn, connMap, data)
-		time.Sleep(time.Millisecond * 50)
+		p := pkg.Pkg{}
+		p.ReadFromConn(conn)
+		log.Println(p)
+
+		handdlePkg(p, conn, connMap, data)
 	}
 }
 
-func handdlePkg(pkg Pkg, conn net.Conn, connMap map[string]net.Conn, data map[string]interface{}) {
+func handdlePkg(p pkg.Pkg, conn net.Conn, connMap map[string]net.Conn, data map[string]interface{}) {
 	// use table or map to save the connections (add lock)
 	// if the user is in table, server can process the package with other package name
 	// otherwise, the server can only process the AuthenRequest
-	checksum := pkg.Checksum
-	pkg.Checksum = uint32(0)
-	if checksum != adler32.Checksum(pkg.Pack()) {
+	checksum := p.Checksum
+	p.Checksum = uint32(0)
+	if checksum != adler32.Checksum(p.Pack()) {
 		log.Println("checksum error")
 	}
 
@@ -153,12 +158,12 @@ func handdlePkg(pkg Pkg, conn net.Conn, connMap map[string]net.Conn, data map[st
 	var sendErr error
 
 	switch {
-	case pkg.PkgName == "AuthRequest":
+	case p.PkgName == "AuthRequest":
 		{
 			// authenticat the user name and passwd
 			// add connection to map
 			req := &pd.AuthRequest{}
-			err := proto.Unmarshal(pkg.Payload, req)
+			err := proto.Unmarshal(p.Payload, req)
 			if err != nil {
 				log.Println(err)
 			}
@@ -204,8 +209,8 @@ func handdlePkg(pkg Pkg, conn net.Conn, connMap map[string]net.Conn, data map[st
 			}
 			connMutex.Unlock()
 
-			resPkg := Pkg{}
-			resPkg.makePkg(name, payloadBytes)
+			resPkg := pkg.Pkg{}
+			resPkg.MakePkg(name, payloadBytes)
 			sendErr = sendPackage(resPkg, conn)
 
 			if !auth || sendErr != nil {
@@ -216,26 +221,23 @@ func handdlePkg(pkg Pkg, conn net.Conn, connMap map[string]net.Conn, data map[st
 
 			go postPoem(conn, data["poems"].([]Poem))
 		}
-	case pkg.PkgName == "Heartbeat":
+	case p.PkgName == "Heartbeat":
 		{
-			// log.Println("heart beat package")
-			// resPkg := Pkg{}
-			// resPkg.makePkg("Heartbeat", make([]byte, 0))
-			sendErr = sendPackage(pkg, conn)
+			sendErr = sendPackage(p, conn)
 		}
-	case pkg.PkgName == "PoemResponse":
+	case p.PkgName == "PoemResponse":
 		{
 			res := &pd.PoemResponse{}
-			err := proto.Unmarshal(pkg.Payload, res)
+			err := proto.Unmarshal(p.Payload, res)
 			if err != nil {
 				log.Println(err)
 			}
 			// log.Println("user received", res)
 		}
-	case pkg.PkgName == "BiographyRequest":
+	case p.PkgName == "BiographyRequest":
 		{
 			req := &pd.BiographyRequest{}
-			err := proto.Unmarshal(pkg.Payload, req)
+			err := proto.Unmarshal(p.Payload, req)
 			if err != nil {
 				log.Println(err)
 			}
@@ -250,14 +252,14 @@ func handdlePkg(pkg Pkg, conn net.Conn, connMap map[string]net.Conn, data map[st
 				log.Println(err)
 			}
 
-			resPkg := Pkg{}
-			resPkg.makePkg("BiographyResponse", payload)
+			resPkg := pkg.Pkg{}
+			resPkg.MakePkg("BiographyResponse", payload)
 
 			sendErr = sendPackage(resPkg, conn)
 		}
 	default:
 		{
-			log.Println("package name undefinde", pkg.PkgName)
+			log.Println("package name undefinde", p.PkgName)
 		}
 	}
 
@@ -279,14 +281,14 @@ func postPoem(conn net.Conn, poems []Poem) {
 			Paragraphs: poem.Paragraphs,
 		}
 
-		pkg := Pkg{}
+		p := pkg.Pkg{}
 		payload, err := proto.Marshal(req)
 		if err != nil {
 			log.Println(err)
 		}
-		pkg.makePkg("PoemRequest", payload)
+		p.MakePkg("PoemRequest", payload)
 
-		err = sendPackage(pkg, conn)
+		err = sendPackage(p, conn)
 		if err != nil {
 			// conn.Close()
 			return
@@ -296,8 +298,8 @@ func postPoem(conn net.Conn, poems []Poem) {
 	}
 }
 
-func sendPackage(pkg Pkg, conn net.Conn) error {
-	byteArr := pkg.Pack()
+func sendPackage(p pkg.Pkg, conn net.Conn) error {
+	byteArr := p.Pack()
 
 	_, err := conn.Write(byteArr)
 	if err != nil {
@@ -316,4 +318,69 @@ func deleteFromMap(connMap map[string]net.Conn, conn net.Conn) {
 			return
 		}
 	}
+}
+
+func ReadData() map[string]interface{} {
+	data := map[string]interface{}{}
+
+	// read user info
+	userInfoPath := "../data/userinfo/user.json"
+	jsonByte := readFrom(userInfoPath)
+	var jsonUser []map[string]string
+	json.Unmarshal(jsonByte, &jsonUser)
+	users := map[string]User{}
+	for _, userMap := range jsonUser {
+		user := User{userMap["name"], userMap["passwd"]}
+		users[userMap["name"]] = user
+	}
+	data["users"] = users
+
+	// read  poems
+	root := "../data/poet/poem/"
+	files, err := os.ReadDir(root)
+	if err != nil {
+		log.Println("open folder err:", err)
+	}
+	var jsonPoem []Poem
+	poems := make([]Poem, 0)
+	for _, file := range files {
+		byteArr := readFrom(root + file.Name())
+		json.Unmarshal(byteArr, &jsonPoem)
+		poems = append(poems, jsonPoem...)
+	}
+	data["poems"] = poems
+
+	//read authors
+	root = "../data/poet/author/"
+	files, err = os.ReadDir(root)
+	if err != nil {
+		log.Println("open folder err:", err)
+	}
+	authors := map[string]Author{}
+	for _, file := range files {
+		byteArr := readFrom(root + file.Name())
+		var jsonAuthor []Author
+		json.Unmarshal(byteArr, &jsonAuthor)
+		for _, author := range jsonAuthor {
+			authors[author.Name] = author
+		}
+	}
+	data["authors"] = authors
+
+	return data
+}
+
+func readFrom(path string) []byte {
+	file, err := os.Open(path)
+	if err != nil {
+		log.Println("error opening file:", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		log.Println("error reading file:", err)
+	}
+
+	return data
 }

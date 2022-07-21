@@ -1,8 +1,10 @@
-package server
+package pkg
 
 import (
 	"hash/adler32"
+	"io"
 	"log"
+	"net"
 )
 
 type Pkg struct {
@@ -70,11 +72,28 @@ func Decode(byteArr []byte, mode string) uint32 {
 	return val
 }
 
-func (pkg *Pkg) makePkg(name string, payload []byte) {
+func (pkg *Pkg) MakePkg(name string, payload []byte) {
 	pkg.PkgLen = uint32(1 + len(name) + len(payload) + 4)
 	pkg.NameLen = uint8(len(name))
 	pkg.PkgName = name
 	pkg.Payload = payload
 	pkg.Checksum = 0
 	pkg.Checksum = adler32.Checksum(pkg.Pack())
+}
+
+func (pkg *Pkg) ReadFromConn(conn net.Conn) {
+	mode := "big"
+	pkgLenByte := make([]byte, 4)
+	_, err := io.ReadFull(conn, pkgLenByte)
+	if err != nil {
+		log.Println(err)
+	}
+
+	pkgLen := Decode(pkgLenByte, mode)
+
+	byteArr := make([]byte, pkgLen+4)
+	copy(byteArr[:4], pkgLenByte[:])
+	conn.Read(byteArr[4:])
+
+	pkg.Unpack(byteArr)
 }
