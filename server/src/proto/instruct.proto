@@ -1,0 +1,51 @@
+syntax = "proto3";
+option go_package = ".;proto";
+package proto;
+
+/*
+    数据封装规则：4字节头部 + 1字节包名长度 + 包名 + protobuf数据 + 4字节adler32
+    注1：4字节adler32校验的是：1字节包名长度 + 包名 + protobuf数据
+    注2：4字节头部和4字节adler32采用大端序
+    注3: header表示数据包长度（异常处理,防止包过大或过小）
+    注4: 包名就是数据包类型
+*/
+
+
+//1.1 客户端主动向服务器请求认证。tcp连接后立即向服务器发送
+message AuthRequest {
+    string username = 1; //用户名称
+    string password = 2; //用户密码
+}
+//1.2 服务端响应客户端的认证请求
+message AuthResponse {
+    bool authorization = 1; //true为认证通过，false为认证失败
+    string interpration = 2; //如果authorization为false，则解释失败原因
+}
+
+
+//2. 客户端每一段时间主动向服务器上报心跳，服务器收到后立即按原样响应心跳
+message Heartbeat {
+}
+
+
+//3.1 在客户端存活期间，服务端定时向客户端发送诗词信息
+message PoemRequest {
+    string title = 1; //标题
+    string author = 2; //作者
+    repeated string strains = 3; //韵律
+    repeated string paragraphs = 4; //内容
+}
+//3.2 客户端收到诗词内容后，向服务端反馈确认信息
+message PoemResponse {
+    string title = 1; //标题
+}
+
+
+//4.1 客户端主动向服务端请求指定作者的生平简介
+message BiographyRequest {
+    string name = 1; //名字
+}
+//4.2 服务端向客户端返回作者简介
+message BiographyResponse {
+    string desc = 1; //简介
+}
