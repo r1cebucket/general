@@ -18,7 +18,7 @@ import (
 var logger *jack.Logger
 
 var (
-	num      = flag.Int("num", 100000, "压测数量")
+	num      = flag.Int("num", 1, "压测数量")
 	funcType = flag.Int("func", 8, "压测函数类型")
 	// addr     = flag.String("addr", "http://mobiletest.chinaeew.cn:443", "压测地址")
 	addr = flag.String("addr", "http://140.210.198.229:80", "压测地址")

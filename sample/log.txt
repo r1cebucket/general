@@ -1,0 +1,2 @@
+time="2022-07-26T14:45:51+08:00" level=info msg="start benchmark"
+time="2022-07-26T14:45:51+08:00" level=error msg="发送http请求失败 0 Get \"http://140.210.198.229:80/v1/signature\": proxyconnect tcp: dial tcp: lookup 1270.0.01: no such host" dandelion=xiaomi
