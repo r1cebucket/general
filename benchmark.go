@@ -3,18 +3,21 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"io"
 	"io/ioutil"
 	"log"
+	r "math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var (
-	num      = flag.Int("num", 10, "压测数量")
+	num      = flag.Int("num", 100000, "压测数量")
 	funcType = flag.Int("func", 8, "压测函数类型")
 	addr     = flag.String("addr", "http://140.210.198.229:80", "压测地址")
 )
@@ -61,56 +64,33 @@ type safety struct {
 
 var backChan chan int
 
-func main() {
-	flag.Parse()
-	backChan = make(chan int, *num)
-	log.Println("start benchmark")
-	go func() {
-		for i := 0; i < *num; i++ {
-			log.Println("client:", i)
-			go httptest(i)
-		}
-	}()
-	// continue request
-	go func() {
-		for v := range backChan {
-			go httptest(v)
-		}
-	}()
-
-	c := make(chan os.Signal)
-	signal.Notify(c, os.Interrupt)
-	<-c
-}
-
-func httptest(i int) {
-	defer func() {
-		time.Sleep(time.Second * 30)
-		// log.Println("http请求结束", i, time.Now())
-		backChan <- i
-	}()
-	log.Println("http请求开始", i, time.Now())
+func (c Client) httptest(testType int) {
+	// defer func() {
+	// 	time.Sleep(time.Second * 3)
+	// 	// log.Println("http请求结束", i, time.Now())
+	// 	backChan <- i
+	// }()
+	// log.Println("http请求开始", i, time.Now())
 	// num := rand.Intn(70)
 	// time.Sleep(time.Duration(num+30) * time.Millisecond)
-	client := &http.Client{}
+	// client := &http.Client{}
 	var data string
 	urlAdrr := *addr
 	httpFunc := "GET"
-	switch *funcType {
+	// switch *funcType {
+	switch testType {
 	case 0: //拉取地震摘要 分页
 		urlAdrr += "/v1/earlywarnings"
 		v := url.Values{}
 		v.Add("page_size", string(10))
 		v.Add("page_num", string(1))
 		data = v.Encode()
-		break
 	case 1: //拉取地震摘要 模拟开始
 		urlAdrr += "/v1/earlywarnings"
 		v := url.Values{}
 		v.Add("start_at", string(0))
 		v.Add("updates", string(1))
 		data = v.Encode()
-		break
 
 	case 2: //拉取地震摘要 不拉取
 		urlAdrr += "/v1/earlywarnings"
@@ -118,30 +98,23 @@ func httptest(i int) {
 		v.Add("start_at", string(1564053255676))
 		v.Add("updates", string(1))
 		data = v.Encode()
-		break
 	case 3: //拉取地震摘要 拉取几个
 		urlAdrr += "/v1/earlywarnings"
 		v := url.Values{}
 		v.Add("start_at", string(1561925853000))
 		v.Add("updates", string(1))
 		data = v.Encode()
-		break
 
 	case 4: //拉取地震 1561925853000 3报
 		urlAdrr += "/v1/earlywarnings/1561925853000"
-		break
 	case 5: //拉取地震 1561213795000 17报
 		urlAdrr += "/v1/earlywarnings/1561213795000"
-		break
 	case 6: //拉取地震 1561237704000 7报
 		urlAdrr += "/v1/earlywarnings/1561237704000"
-		break
 	case 7: //拉取版本
 		urlAdrr += "/v1/version"
-		break
 	case 8: //拉取署名
 		urlAdrr += "/v1/signature"
-		break
 	case 9: //拉取公告 分页
 		urlAdrr += "/v1/announcements"
 		v := url.Values{}
@@ -160,10 +133,8 @@ func httptest(i int) {
 		data = v.Encode()
 	case 12: //来取科普
 		urlAdrr += "/v1/popularization"
-		break
 	case 13: //来取典型地震 有返回
 		urlAdrr += "/v1/model"
-		break
 	case 14: //登录
 		httpFunc = "POST"
 		urlAdrr += "/v1/login"
@@ -177,7 +148,6 @@ func httptest(i int) {
 			return
 		}
 		data = string(loginByte)
-		break
 	case 15: //注册
 		httpFunc = "POST"
 		urlAdrr += "/v1/users"
@@ -192,7 +162,6 @@ func httptest(i int) {
 			return
 		}
 		data = string(loginByte)
-		break
 	case 16: //上传push id
 		httpFunc = "POST"
 		urlAdrr += "/v1/mark"
@@ -207,7 +176,6 @@ func httptest(i int) {
 			return
 		}
 		data = string(loginByte)
-		break
 	case 17: //上报预警接收回传
 		httpFunc = "POST"
 		urlAdrr += "/v1/feedback/earlywarnings"
@@ -242,7 +210,6 @@ func httptest(i int) {
 			return
 		}
 		data = string(loginByte)
-		break
 	case 18: //上传预警反馈
 		httpFunc = "POST"
 		urlAdrr += "/v1/feedback/safety"
@@ -260,26 +227,95 @@ func httptest(i int) {
 			return
 		}
 		data = string(safeByte)
-		break
 	default:
 		return
 	}
 
 	request, err := http.NewRequest(httpFunc, urlAdrr, strings.NewReader(data))
 	if err != nil {
-		log.Println("创建http请求失败", i, err.Error())
+		log.Println("创建http请求失败", c.id, err.Error())
+		log_str := "client " + c.id + " create request faild: " + err.Error()
+		log_file(log_str)
 		return
 	}
 
-	resp, err := client.Do(request)
+	resp, err := c.clientHttp.Do(request)
 	if err != nil {
-		log.Println("发送http请求失败", i, err.Error())
+		log.Println("发送http请求失败", c.id, err.Error())
+		log_str := "client " + c.id + " send request faild: " + err.Error()
+		log_file(log_str)
 		return
 	}
 	_, err = ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Println("读取http响应失败", i, err.Error())
+		log.Println("读取http响应失败", c.id, err.Error())
+		log_str := "client " + c.id + " get reaponse faild: " + err.Error()
+		log_file(log_str)
 		return
 	}
+	log.Println("client:", c.id, "response status:", resp.Status)
 	resp.Body.Close()
+}
+
+type Client struct {
+	id         string
+	ipAddr     string
+	clientHttp *http.Client
+}
+
+func (c *Client) start() {
+	time.Sleep(time.Second * time.Duration(r.Intn(3)))
+	// login
+	c.httptest(14)
+	time.Sleep(time.Second)
+	c.httptest(9)
+	ticker := time.NewTicker(time.Second * 10)
+	for range ticker.C {
+		c.httptest(r.Intn(3) + 4)
+	}
+}
+
+func main() {
+	// flag.Parse()
+	// backChan = make(chan int, *num)
+	// log.Println("start benchmark")
+	// go func() {
+	// 	for i := 0; i < *num; i++ {
+	// 		log.Println("client:", i)
+	// 		go httptest(i)
+	// 	}
+	// }()
+	// // continue request
+	// go func() {
+	// 	for v := range backChan {
+	// 		go httptest(v)
+	// 	}
+	// }()
+	for i := 0; i < *num; i++ {
+		c := Client{
+			id:         strconv.Itoa(i),
+			ipAddr:     "123",
+			clientHttp: &http.Client{},
+		}
+		go c.start()
+	}
+
+	quitChan := make(chan os.Signal)
+	signal.Notify(quitChan, os.Interrupt)
+	<-quitChan
+}
+
+func log_file(s string) {
+	file_name := "faild.log"
+	file, err := os.OpenFile(file_name, os.O_APPEND|os.O_WRONLY, 0666)
+	if err != nil {
+		file, err = os.Create(file_name)
+		if err != nil {
+			log.Println(err)
+		}
+	}
+	_, err = io.WriteString(file, s+"\n")
+	if err != nil {
+		log.Println(err)
+	}
 }
