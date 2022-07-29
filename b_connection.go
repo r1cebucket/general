@@ -7,10 +7,12 @@ import (
 	"io/ioutil"
 	"log"
 	r "math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
+
+	// "os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -62,9 +64,7 @@ type safety struct {
 	Note           string `json:"note"`           //备注
 }
 
-var backChan chan int
-
-func (c Client) httptest(testType int) {
+func (c *Client) httptest(testType int) {
 	// defer func() {
 	// 	time.Sleep(time.Second * 3)
 	// 	// log.Println("http请求结束", i, time.Now())
@@ -73,7 +73,7 @@ func (c Client) httptest(testType int) {
 	// log.Println("http请求开始", i, time.Now())
 	// num := rand.Intn(70)
 	// time.Sleep(time.Duration(num+30) * time.Millisecond)
-	// client := &http.Client{}
+	// c.clientHttp = &http.Client{}
 	var data string
 	urlAdrr := *addr
 	httpFunc := "GET"
@@ -239,6 +239,8 @@ func (c Client) httptest(testType int) {
 		return
 	}
 
+	request.Header.Set("Connection", "keep-alive")
+
 	resp, err := c.clientHttp.Do(request)
 	if err != nil {
 		log.Println("发送http请求失败", c.id, err.Error())
@@ -264,45 +266,27 @@ type Client struct {
 }
 
 func (c *Client) start() {
-	time.Sleep(time.Second * time.Duration(r.Intn(3)))
-	// login
-	c.httptest(14)
-	time.Sleep(time.Second)
-	c.httptest(9)
-	ticker := time.NewTicker(time.Second * 10)
-	for range ticker.C {
+	// time.Sleep(time.Second * time.Duration(r.Intn(3)))
+	// // login
+	// c.httptest(14)
+	// time.Sleep(time.Second)
+	// c.httptest(9)
+	// ticker := time.NewTicker(time.Second * 10)
+	// for range ticker.C {
+	// 	c.httptest(r.Intn(3) + 4)
+	// }
+	for i := 0; i < 10; i++ {
 		c.httptest(r.Intn(3) + 4)
+		time.Sleep(time.Second * 15)
 	}
 }
 
 func main() {
-	// flag.Parse()
-	// backChan = make(chan int, *num)
-	// log.Println("start benchmark")
-	// go func() {
-	// 	for i := 0; i < *num; i++ {
-	// 		log.Println("client:", i)
-	// 		go httptest(i)
-	// 	}
-	// }()
-	// // continue request
-	// go func() {
-	// 	for v := range backChan {
-	// 		go httptest(v)
-	// 	}
-	// }()
-	for i := 0; i < *num; i++ {
-		c := Client{
-			id:         strconv.Itoa(i),
-			ipAddr:     "123",
-			clientHttp: &http.Client{},
-		}
-		go c.start()
-	}
+	sendWithIP()
 
-	quitChan := make(chan os.Signal)
-	signal.Notify(quitChan, os.Interrupt)
-	<-quitChan
+	// quitChan := make(chan os.Signal)
+	// signal.Notify(quitChan, os.Interrupt)
+	// <-quitChan
 }
 
 func log_file(s string) {
@@ -318,4 +302,32 @@ func log_file(s string) {
 	if err != nil {
 		log.Println(err)
 	}
+}
+
+func sendWithIP() {
+	for i := 0; i < *num; i++ {
+		// netAddr := &net.TCPAddr{IP: ipAddr, Port: 0}
+		netAddr := &net.TCPAddr{}
+		dialer := &net.Dialer{LocalAddr: netAddr}
+		tr := &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dialer.DialContext,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       120 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+		c := Client{
+			id: strconv.Itoa(i),
+			clientHttp: &http.Client{
+				Transport: tr,
+				// Timeout:   60 * time.Second,
+			},
+			// clientHttp: &http.Client{},
+		}
+		go c.start()
+		// go c.httptest()
+		time.Sleep(time.Microsecond * 50)
+	}
+	time.Sleep(time.Second)
 }
