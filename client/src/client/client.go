@@ -124,20 +124,20 @@ func (c Client) Authenticate(conn net.Conn) bool {
 
 func sendHeartBeat(conn net.Conn) {
 	name := "Heartbeat"
-	payloadBytes := make([]byte, 0)
+	payload := make([]byte, 0)
 
-	p := packet.Packet{0, uint8(len(name)), name, payloadBytes, 0}
-	p.PacketLen = uint32(1 + len(name) + len(payloadBytes) + 4)
-	p.Checksum = adler32.Checksum(p.Pack())
+	p := packet.Packet{}
+	p.MakePacket(name, payload)
 
 	for {
+		time.Sleep(time.Second * 3)
 		err := sendPacket(p, conn)
+		log.Println("send heartbeat")
 		if err != nil {
 			log.Println("connection closed")
 			conn.Close()
 			break
 		}
-		time.Sleep(time.Second * 30)
 	}
 }
 

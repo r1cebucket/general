@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"os/signal"
-	"time"
 
 	"tcpclient/client"
 )
@@ -22,7 +21,6 @@ func main() {
 	// go c1.Start()
 	// c2 := client.Client{"tmpname2", "tmppasswd2"}
 	// go c2.Start()
-	time.Sleep(time.Hour)
 
 	quitChan := make(chan os.Signal, 1)
 	signal.Notify(quitChan, os.Interrupt)
