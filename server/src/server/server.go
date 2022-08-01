@@ -123,7 +123,7 @@ func (server *Server) chanTrigger() {
 
 // create Client to save info
 // receive and send packet in the conn
-func (server *Server) handleConn(conn net.Conn) {
+func (s *Server) handleConn(conn net.Conn) {
 	// after authentication, if the user already has a connection, then replace it
 	c := Client{
 		conn:     conn,
@@ -141,8 +141,44 @@ func (server *Server) handleConn(conn net.Conn) {
 	// need quit for these two functions
 	// another connection set up for the same user
 	// need to quit the old client
-	go c.receive()
-	go c.send()
+	go s.receiveFromClient(c)
+	go s.sendToClient(c)
+}
+
+func (s Server) receiveFromClient(c Client) { // todo timeout
+	for {
+		p := packet.Packet{}
+		if err := p.ReadFromConn(c.conn); err != nil {
+			log.Println("read from the connection error:", err)
+			break
+		}
+		// get handler with packet name
+		handler, handlerExist := c.handlers[p.PacketName]
+		if !handlerExist {
+			log.Println("packet name undefined")
+			continue
+		}
+		if err := handler(p.Payload, s); err != nil {
+			log.Println(err)
+		}
+	}
+	c.stop()
+}
+
+func (s Server) sendToClient(c Client) error {
+	for {
+		select {
+		case byteArr := <-c.sendChan:
+			log.Println("send packet")
+			n, err := c.conn.Write(byteArr)
+			if err != nil || n != len(byteArr) {
+				return err
+			}
+		case <-c.quitChan:
+			c.stop()
+			return nil
+		}
+	}
 }
 
 // message handlers

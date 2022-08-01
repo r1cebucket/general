@@ -18,42 +18,6 @@ type Client struct {
 	handlers map[string]messageHandler
 }
 
-func (c *Client) receive() { // todo timeout
-	for {
-		p := packet.Packet{}
-		if err := p.ReadFromConn(c.conn); err != nil {
-			log.Println("read from the connection error:", err)
-			break
-		}
-		// get handler with packet name
-		handler, handlerExist := c.handlers[p.PacketName]
-		if !handlerExist {
-			log.Println("packet name undefined")
-			continue
-		}
-		if err := handler(p.Payload, s); err != nil {
-			log.Println(err)
-		}
-	}
-	c.stop()
-}
-
-func (c *Client) send() error {
-	for {
-		select {
-		case byteArr := <-c.sendChan:
-			log.Println("send packet")
-			n, err := c.conn.Write(byteArr)
-			if err != nil || n != len(byteArr) {
-				return err
-			}
-		case <-c.quitChan:
-			c.stop()
-			return nil
-		}
-	}
-}
-
 // packet handlers
 func (c *Client) authReqHandler(payload []byte, s Server) error {
 	// authenticat the user name and passwd
