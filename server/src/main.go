@@ -2,8 +2,10 @@ package main
 
 import (
 	"os"
+	"os/signal"
+	"syscall"
 
-	"./server"
+	"tcpserver/server"
 )
 
 func main() {
@@ -18,4 +20,8 @@ func main() {
 	}
 
 	server.Start(port)
+	quitChan := make(chan os.Signal)
+	signal.Notify(quitChan, syscall.SIGINT, syscall.SIGTERM)
+	<-quitChan
+
 }

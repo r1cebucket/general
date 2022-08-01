@@ -6,8 +6,11 @@ import (
 	"net"
 	"time"
 
-	pd "../proto"
-	"google.golang.org/protobuf/proto"
+	pd "tcpclient/proto"
+
+	"tcpclient/packet"
+
+	proto "google.golang.org/protobuf/proto"
 )
 
 type Client struct {
@@ -16,10 +19,10 @@ type Client struct {
 }
 
 type Poem struct {
-	Strains    []string `json:strains`
-	Author     string   `json:author`
-	Paragraphs []string `json:paragraphs`
-	Title      string   `json:title`
+	Strains    []string `json:"strains"`
+	Author     string   `json:"author"`
+	Paragraphs []string `json:"paragraphs"`
+	Title      string   `json:"title"`
 }
 
 func (client Client) Start() {
@@ -48,8 +51,8 @@ func ConnnetServer(ipAddr string, port string) net.Conn {
 	return conn
 }
 
-func sendPackage(pkg Pkg, conn net.Conn) error {
-	byteArr := pkg.Pack()
+func sendPacket(p packet.Packet, conn net.Conn) error {
+	byteArr := p.Pack()
 
 	_, err := conn.Write(byteArr)
 	if err != nil {
@@ -71,40 +74,40 @@ func (c Client) Authenticate(conn net.Conn) bool {
 		log.Println(err)
 	}
 
-	pkg := Pkg{0, uint8(len(name)), name, payloadBytes, 0}
-	pkg.PkgLen = uint32(1 + len(name) + len(payloadBytes) + 4)
-	pkg.Checksum = adler32.Checksum(pkg.Pack())
-	sendPackage(pkg, conn)
+	p := packet.Packet{0, uint8(len(name)), name, payloadBytes, 0}
+	p.PacketLen = uint32(1 + len(name) + len(payloadBytes) + 4)
+	p.Checksum = adler32.Checksum(p.Pack())
+	sendPacket(p, conn)
 
 	// wait for response
 	mode := "big"
-	pkgLenByte := make([]byte, 4)
-	_, err = conn.Read(pkgLenByte)
+	packetLenByte := make([]byte, 4)
+	_, err = conn.Read(packetLenByte)
 	if err != nil {
 		log.Println(err)
 	}
 
-	pkgLen := Decode(pkgLenByte, mode)
+	packetLen := packet.Decode(packetLenByte, mode)
 
-	byteArr := make([]byte, pkgLen+4)
-	copy(byteArr[:4], pkgLenByte[:])
+	byteArr := make([]byte, packetLen+4)
+	copy(byteArr[:4], packetLenByte[:])
 	conn.Read(byteArr[4:])
 
-	pkg = Pkg{}
-	pkg.Unpack(byteArr)
+	p = packet.Packet{}
+	p.Unpack(byteArr)
 
-	checksum := pkg.Checksum
-	pkg.Checksum = uint32(0)
-	if checksum != adler32.Checksum(pkg.Pack()) {
+	checksum := p.Checksum
+	p.Checksum = uint32(0)
+	if checksum != adler32.Checksum(p.Pack()) {
 		log.Println("checksum error")
 	}
 
-	if pkg.PkgName != "AuthResponse" {
+	if p.PacketName != "AuthResponse" {
 		return false
 	}
 
 	res := &pd.AuthResponse{}
-	err = proto.Unmarshal(pkg.Payload, res)
+	err = proto.Unmarshal(p.Payload, res)
 	if err != nil {
 		log.Println(err)
 	}
@@ -123,12 +126,12 @@ func sendHeartBeat(conn net.Conn) {
 	name := "Heartbeat"
 	payloadBytes := make([]byte, 0)
 
-	pkg := Pkg{0, uint8(len(name)), name, payloadBytes, 0}
-	pkg.PkgLen = uint32(1 + len(name) + len(payloadBytes) + 4)
-	pkg.Checksum = adler32.Checksum(pkg.Pack())
+	p := packet.Packet{0, uint8(len(name)), name, payloadBytes, 0}
+	p.PacketLen = uint32(1 + len(name) + len(payloadBytes) + 4)
+	p.Checksum = adler32.Checksum(p.Pack())
 
 	for {
-		err := sendPackage(pkg, conn)
+		err := sendPacket(p, conn)
 		if err != nil {
 			log.Println("connection closed")
 			conn.Close()
@@ -141,37 +144,37 @@ func sendHeartBeat(conn net.Conn) {
 func handdleConn(conn net.Conn) {
 	for {
 		mode := "big"
-		pkgLenByte := make([]byte, 4)
-		_, err := conn.Read(pkgLenByte)
+		packetLenByte := make([]byte, 4)
+		_, err := conn.Read(packetLenByte)
 		if err != nil {
 			log.Println("connection closed")
 			conn.Close()
 			break
 		}
 
-		pkgLen := Decode(pkgLenByte, mode)
+		packetLen := packet.Decode(packetLenByte, mode)
 
-		byteArr := make([]byte, pkgLen+4)
-		copy(byteArr[:4], pkgLenByte[:])
+		byteArr := make([]byte, packetLen+4)
+		copy(byteArr[:4], packetLenByte[:])
 		conn.Read(byteArr[4:])
 
-		pkg := Pkg{}
-		pkg.Unpack(byteArr)
+		p := packet.Packet{}
+		p.Unpack(byteArr)
 
-		handdlePkg(pkg, conn)
+		handdlePacket(p, conn)
 	}
 }
 
-func handdlePkg(pkg Pkg, conn net.Conn) {
+func handdlePacket(p packet.Packet, conn net.Conn) {
 	switch {
-	case pkg.PkgName == "Heartbeat":
+	case p.PacketName == "Heartbeat":
 		{
 			log.Println("heartbeat from server")
 		}
-	case pkg.PkgName == "PoemRequest":
+	case p.PacketName == "PoemRequest":
 		{
 			req := &pd.PoemRequest{}
-			err := proto.Unmarshal(pkg.Payload, req)
+			err := proto.Unmarshal(p.Payload, req)
 			if err != nil {
 				log.Println(err)
 			}
@@ -185,20 +188,20 @@ func handdlePkg(pkg Pkg, conn net.Conn) {
 			if err != nil {
 				log.Println(err)
 			}
-			resPkg := Pkg{}
-			resPkg.makePkg("PoemResponse", payload)
+			resPacket := packet.Packet{}
+			resPacket.MakePacket("PoemResponse", payload)
 
-			sendPackage(resPkg, conn)
+			sendPacket(resPacket, conn)
 		}
-	case pkg.PkgName == "BiographyResponse":
+	case p.PacketName == "BiographyResponse":
 		{
 			res := &pd.BiographyResponse{}
-			proto.Unmarshal(pkg.Payload, res)
+			proto.Unmarshal(p.Payload, res)
 			log.Println(res)
 		}
 	default:
 		{
-			log.Println("package name undefine:", pkg.PkgName)
+			log.Println("package name undefine:", p.PacketName)
 		}
 	}
 }
@@ -213,8 +216,8 @@ func fetchDesc(name string, conn net.Conn) {
 		log.Println(err)
 	}
 
-	pkg := Pkg{}
-	pkg.makePkg("BiographyRequest", payload)
+	p := packet.Packet{}
+	p.MakePacket("BiographyRequest", payload)
 
-	sendPackage(pkg, conn)
+	sendPacket(p, conn)
 }

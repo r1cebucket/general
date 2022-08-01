@@ -9,19 +9,24 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
-	"../pkg"
-	pd "../proto"
-	"google.golang.org/protobuf/proto"
+	"tcpserver/packet"
+
+	pd "tcpserver/proto"
+
+	proto "google.golang.org/protobuf/proto"
 )
 
+type messageHandler func([]byte, Client) error
+
 type Server struct {
-	ipAddr   string
-	port     string
-	listener net.TCPListener
-	connMap  map[string]net.Conn
+	addr       string
+	listener   net.TCPListener
+	data       map[string]interface{}
+	clientMap  map[string]Client
+	msgChanMap map[string]chan interface{}
+	handlers   map[string]messageHandler // byteArr -> handler -> byteArr in sendChan
 }
 
 type User struct {
@@ -41,62 +46,240 @@ type Author struct {
 	Desc string `json:"desc"`
 }
 
-var connMutex sync.RWMutex
+type Client struct {
+	Username string
+	login    bool
+	conn     net.Conn
+	sendChan chan []byte
+	quitChan chan bool
+}
+
+// client todo
+func (c Client) stop() {
+	c.conn.Close()
+	return
+}
 
 func Start(port string) {
-	ipAddr := "127.0.0.1"
-	data := ReadData()
-	tcpAddr := ipAddr + ":" + port
+	server := Server{}
+
+	// setup
+	server.setupServer(port)
+
+	// put into channel
+	go server.logTicker()
+	go server.acceptConn()
+	// get out of channel
+	go server.chanTrigger()
+}
+
+func (server *Server) setupServer(port string) {
+	tcpAddr := "127.0.0.1:" + port
 	addr, err := net.ResolveTCPAddr("tcp", tcpAddr)
 	if err != nil {
 		log.Panic(err)
 	}
 
-	listener, err := net.ListenTCP("tcp", addr)
+	tcpListener, err := net.ListenTCP("tcp", addr)
 	if err != nil {
 		log.Panic(err)
 	}
 
-	server := Server{
-		ipAddr,
-		port,
-		*listener,
-		map[string]net.Conn{},
+	server.addr = tcpAddr
+	server.listener = *tcpListener
+	server.clientMap = map[string]Client{}
+	server.msgChanMap = map[string]chan interface{}{}
+	server.data = ReadData()
+
+	// add msg type
+	server.msgChanMap["LogTicker"] = make(chan interface{}, 10)
+	server.msgChanMap["AcceptConn"] = make(chan interface{}, 10)
+	server.msgChanMap["Login"] = make(chan interface{}, 10)
+
+	// add handlers
+	server.handlers = map[string]messageHandler{}
+	server.handlers["AuthRequest"] = server.authReqHandler
+	server.handlers["Heartbeat"] = server.heartbeatHandler
+
+	log.Println("Server start at: " + server.addr)
+}
+
+func (server Server) logTicker() {
+	ticker := time.NewTicker(3 * time.Second)
+
+	for range ticker.C {
+		server.msgChanMap["LogTicker"] <- nil
 	}
+	ticker.Stop()
+}
 
-	log.Println("Server start at: " + server.port)
-
-	connMap := map[string]net.Conn{}
-	go server.getConnNum(connMap)
-
+func (server Server) acceptConn() {
 	for {
-		conn, err := listener.AcceptTCP()
+		conn, err := server.listener.AcceptTCP()
 		if err != nil {
 			continue
 		}
-
-		go handdleConn(conn, connMap, data)
-		// go readFromConn(conn)
-		// go writeToConn(conn)
+		server.msgChanMap["AcceptConn"] <- conn
 	}
 }
 
-// func trigger (){
+func (server *Server) chanTrigger() {
+	// wait until there is message in the channel
+	for {
+		select {
+		case <-server.msgChanMap["LogTicker"]:
+			server.logConnNum()
+		case connIf := <-server.msgChanMap["AcceptConn"]:
+			conn := connIf.(net.Conn)
+			server.handleConn(conn)
+		case clientIf := <-server.msgChanMap["Login"]:
+			c := clientIf.(Client)
+			server.handleLogin(c)
+		}
+	}
+}
 
-// }
+// create Client to save info
+// receive and send packet in the conn
+func (server *Server) handleConn(conn net.Conn) {
+	// after authentication, if the user already has a connection, then replace it
+	c := Client{}
+	c.conn = conn
+	c.login = false
+	c.quitChan = make(chan bool)
+
+	// send and receive
+	// need quit for these two functions
+	// another connection set up for the same user
+	// need to quit the old client
+	go server.receiveFromClient(c)
+	go server.sendToClient(c)
+}
+
+func (server Server) receiveFromClient(c Client) { // todo timeout
+	for {
+		p := packet.Packet{}
+		if err := p.ReadFromConn(c.conn); err != nil {
+			log.Println("read from the connection error:", err)
+			break
+		}
+		// get handler with packet name
+		log.Println(p.PacketName)
+		handler, handlerExist := server.handlers[p.PacketName]
+		if !handlerExist {
+			log.Println("packet name undefined")
+			continue
+		}
+		if err := handler(p.Payload, c); err != nil {
+			log.Println(err)
+		}
+	}
+	c.stop()
+}
+
+func (server Server) sendToClient(c Client) error {
+	for {
+		select {
+		case byteArr := <-c.sendChan:
+			n, err := c.conn.Write(byteArr)
+			if err != nil || n != len(byteArr) {
+				return err
+			}
+		case <-c.quitChan:
+			c.stop()
+			return nil
+		}
+	}
+}
+
+// message handlers
+func (s Server) handleLogin(c Client) {
+	clientOld, connExist := s.clientMap[c.Username]
+	// add the conn
+	// if the username exist in map, renew
+	if connExist && c.login {
+		clientOld.stop() // todo chan?
+		log.Println("connection exist, reset")
+		s.clientMap[c.Username] = c
+	} else if !connExist && c.login {
+		log.Println("new connection")
+		s.clientMap[c.Username] = c
+	} else if !c.login {
+		c.stop()
+		log.Println("authentication error")
+	}
+
+	// start to post poems
+	go s.postPoem(c)
+}
+
+// packet handlers
+func (s Server) authReqHandler(payload []byte, c Client) error {
+	// authenticat the user name and passwd
+	// add connection to map
+	req := &pd.AuthRequest{}
+	if err := proto.Unmarshal(payload, req); err != nil {
+		log.Println(err)
+		return err
+	}
+	c.Username = req.Username
+
+	var interp string
+	users := s.data["users"].(map[string]User)
+	if req.Password == users[req.Username].Passwd {
+		c.login = true
+		interp = "authentication pass"
+	} else {
+		c.login = false
+		interp = "user name or password error"
+	}
+	log.Println(c.Username, interp)
+
+	// send response
+	name := "AuthResponse"
+
+	resPayload := &pd.AuthResponse{
+		Authorization: c.login,
+		Interpration:  interp,
+	}
+	payloadBytes, err := proto.Marshal(resPayload)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	resPacket := packet.Packet{}
+	resPacket.MakePacket(name, payloadBytes)
+
+	// sendErr := sendPacket(resPacket, c.conn)
+	// if !c.login || sendErr != nil {
+	// 	c.conn.Close()
+	// 	// deleteFromMap(clientMap, conn)
+	// 	return sendErr
+	// }
+
+	c.sendChan <- resPacket.Pack()
+	// save connection
+	s.msgChanMap["Login"] <- c
+
+	return nil
+}
+
+func (s Server) heartbeatHandler(payload []byte, c Client) error {
+	p := packet.Packet{}
+	p.MakePacket("Heartbeat", payload)
+	c.sendChan <- p.Pack()
+	log.Println("heartbeat from client:" + c.Username)
+	return nil
+}
+
+func 
 
 // log
-func (s Server) getConnNum(connMap map[string]net.Conn) {
-	for {
-
-		// log_str := getPortConn(s.port)
-		connMutex.RLock()
-		log_str := "port " + string(s.port) + " TCP connection #: " + strconv.Itoa(len(connMap))
-		connMutex.RUnlock()
-		log.Println(log_str)
-		log_file(log_str)
-		time.Sleep(time.Second * 3)
-	}
+func (server Server) logConnNum() {
+	// log_str := getPortConn(s.port)
+	log_str := "port " + string(server.addr) + " TCP connection #: " + strconv.Itoa(len(server.clientMap))
+	log.Println(log_str)
+	log_file(log_str)
 }
 
 func log_file(s string) {
@@ -115,38 +298,9 @@ func log_file(s string) {
 }
 
 // function
-func handdleConn(conn net.Conn, connMap map[string]net.Conn, data map[string]interface{}) {
-	for {
-		// mode := "big"
-		// pkgLenByte := make([]byte, 4)
-		// _, err := conn.Read(pkgLenByte)
-		// if err != nil {
-		// 	log.Println("connection closed")
-		// 	conn.Close()
-		// 	deleteFromMap(connMap, conn)
-		// 	return
-		// }
-
-		// pkgLen := Decode(pkgLenByte, mode)
-
-		// byteArr := make([]byte, pkgLen+4)
-		// copy(byteArr[:4], pkgLenByte[:])
-		// conn.Read(byteArr[4:])
-
-		// pkg := Pkg{}
-		// pkg.Unpack(byteArr)
-
-		p := pkg.Pkg{}
-		p.ReadFromConn(conn)
-		log.Println(p)
-
-		handdlePkg(p, conn, connMap, data)
-	}
-}
-
-func handdlePkg(p pkg.Pkg, conn net.Conn, connMap map[string]net.Conn, data map[string]interface{}) {
+func handdlePacket(p packet.Packet, conn net.Conn, clientMap map[string]net.Conn, data map[string]interface{}) {
 	// use table or map to save the connections (add lock)
-	// if the user is in table, server can process the package with other package name
+	// if the user is in table, server can process the packet with other packet name
 	// otherwise, the server can only process the AuthenRequest
 	checksum := p.Checksum
 	p.Checksum = uint32(0)
@@ -158,7 +312,7 @@ func handdlePkg(p pkg.Pkg, conn net.Conn, connMap map[string]net.Conn, data map[
 	var sendErr error
 
 	switch {
-	case p.PkgName == "AuthRequest":
+	case p.PacketName == "AuthRequest":
 		{
 			// authenticat the user name and passwd
 			// add connection to map
@@ -193,39 +347,39 @@ func handdlePkg(p pkg.Pkg, conn net.Conn, connMap map[string]net.Conn, data map[
 			}
 
 			// save connection
-			connMutex.Lock()
-			connOld, connExist := connMap[req.Username]
+			// connMutex.Lock()
+			connOld, connExist := clientMap[req.Username]
 			if pass {
 				// add the conn
 				// if the username exist in map, renew
 				if connExist {
 					connOld.Close()
 					// log.Println("connection exist, renew")
-					connMap[req.Username] = conn
+					clientMap[req.Username] = conn
 				} else {
 					// log.Println("new connection")
-					connMap[req.Username] = conn
+					clientMap[req.Username] = conn
 				}
 			}
-			connMutex.Unlock()
+			// connMutex.Unlock()
 
-			resPkg := pkg.Pkg{}
-			resPkg.MakePkg(name, payloadBytes)
-			sendErr = sendPackage(resPkg, conn)
+			resPacket := packet.Packet{}
+			resPacket.MakePacket(name, payloadBytes)
+			sendErr = sendPacket(resPacket, conn)
 
 			if !auth || sendErr != nil {
 				conn.Close()
-				deleteFromMap(connMap, conn)
+				deleteFromMap(clientMap, conn)
 				return
 			}
 
-			go postPoem(conn, data["poems"].([]Poem))
+			// go postPoem(conn, data["poems"].([]Poem))
 		}
-	case p.PkgName == "Heartbeat":
+	case p.PacketName == "Heartbeat":
 		{
-			sendErr = sendPackage(p, conn)
+			sendErr = sendPacket(p, conn)
 		}
-	case p.PkgName == "PoemResponse":
+	case p.PacketName == "PoemResponse":
 		{
 			res := &pd.PoemResponse{}
 			err := proto.Unmarshal(p.Payload, res)
@@ -234,7 +388,7 @@ func handdlePkg(p pkg.Pkg, conn net.Conn, connMap map[string]net.Conn, data map[
 			}
 			// log.Println("user received", res)
 		}
-	case p.PkgName == "BiographyRequest":
+	case p.PacketName == "BiographyRequest":
 		{
 			req := &pd.BiographyRequest{}
 			err := proto.Unmarshal(p.Payload, req)
@@ -252,25 +406,27 @@ func handdlePkg(p pkg.Pkg, conn net.Conn, connMap map[string]net.Conn, data map[
 				log.Println(err)
 			}
 
-			resPkg := pkg.Pkg{}
-			resPkg.MakePkg("BiographyResponse", payload)
+			resPacket := packet.Packet{}
+			resPacket.MakePacket("BiographyResponse", payload)
 
-			sendErr = sendPackage(resPkg, conn)
+			sendErr = sendPacket(resPacket, conn)
 		}
 	default:
 		{
-			log.Println("package name undefinde", p.PkgName)
+			log.Println("packet name undefinde", p.PacketName)
 		}
 	}
 
 	if sendErr != nil {
 		conn.Close()
-		deleteFromMap(connMap, conn)
+		deleteFromMap(clientMap, conn)
 	}
 }
 
-func postPoem(conn net.Conn, poems []Poem) {
-	for {
+func (s Server) postPoem(c Client) {
+	ticker := time.NewTicker(time.Minute * 10)
+	poems := s.data["poems"].([]Poem)
+	for range ticker.C {
 		rand.Seed(time.Now().Unix())
 		poem := poems[rand.Intn(len(poems))]
 
@@ -281,40 +437,27 @@ func postPoem(conn net.Conn, poems []Poem) {
 			Paragraphs: poem.Paragraphs,
 		}
 
-		p := pkg.Pkg{}
+		p := packet.Packet{}
 		payload, err := proto.Marshal(req)
 		if err != nil {
 			log.Println(err)
 		}
-		p.MakePkg("PoemRequest", payload)
+		p.MakePacket("PoemRequest", payload)
 
-		err = sendPackage(p, conn)
+		err = sendPacket(p, c.conn)
 		if err != nil {
-			// conn.Close()
-			return
+			break
 		}
-
-		time.Sleep(time.Minute * 10)
 	}
+	ticker.Stop()
 }
 
-func sendPackage(p pkg.Pkg, conn net.Conn) error {
-	byteArr := p.Pack()
-
-	_, err := conn.Write(byteArr)
-	if err != nil {
-		log.Println("send package err:", err)
-		// conn.Close()
-	}
-	return err
-}
-
-func deleteFromMap(connMap map[string]net.Conn, conn net.Conn) {
-	connMutex.Lock()
-	for name := range connMap {
-		if connMap[name] == conn {
-			delete(connMap, name)
-			connMutex.Unlock()
+func deleteFromMap(clientMap map[string]net.Conn, conn net.Conn) {
+	// connMutex.Lock()
+	for name := range clientMap {
+		if clientMap[name] == conn {
+			delete(clientMap, name)
+			// connMutex.Unlock()
 			return
 		}
 	}
@@ -383,4 +526,15 @@ func readFrom(path string) []byte {
 	}
 
 	return data
+}
+
+// Drop!!!!!!!!!!
+func sendPacket(p packet.Packet, conn net.Conn) error {
+	byteArr := p.Pack()
+	_, err := conn.Write(byteArr)
+	if err != nil {
+		log.Println("send packet err:", err)
+		// conn.Close()
+	}
+	return err
 }
