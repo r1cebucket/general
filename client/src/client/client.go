@@ -1,7 +1,6 @@
 package client
 
 import (
-	"hash/adler32"
 	"log"
 	"net"
 	"time"
@@ -13,7 +12,20 @@ import (
 	proto "google.golang.org/protobuf/proto"
 )
 
+type messageHandler func([]byte) error
+
 type Client struct {
+	user  User
+	conn  net.Conn
+	login bool
+
+	sendChan   chan []byte
+	msgChanMap map[string]chan interface{}
+	handlers   map[string]messageHandler
+	// heartbeatTimer time.Timer
+}
+
+type User struct {
 	UserID string
 	Passwd string
 }
@@ -25,188 +37,139 @@ type Poem struct {
 	Title      string   `json:"title"`
 }
 
-func (client Client) Start() {
-	conn := ConnnetServer("127.0.0.1", "8000")
-	pass := client.Authenticate(conn)
-	if !pass {
-		return
-	}
-	go handdleConn(conn)
-	go sendHeartBeat(conn)
-	time.Sleep(time.Second * 30)
-	go fetchDesc("宋太祖", conn)
+func (c *Client) Init(u User) {
+	c.user = u
+	c.login = false
+	c.sendChan = make(chan []byte, 10)
+
+	c.msgChanMap = map[string]chan interface{}{}
+	c.msgChanMap["Heartbeat"] = make(chan interface{}, 1)
+	c.msgChanMap["Quit"] = make(chan interface{}, 1)
+	c.msgChanMap["SetupConn"] = make(chan interface{}, 1)
+	c.msgChanMap["SetupConn"] <- true
+
+	// add headler
+	c.handlers = map[string]messageHandler{}
+	c.handlers["AuthResponse"] = c.authResHandler
+	c.handlers["Heartbeat"] = c.heartbeatHandler
+	c.handlers["PoemRequest"] = c.poemReqHandler
+	c.handlers["BiographyResponse"] = c.biogResHandler
 }
 
-func ConnnetServer(ipAddr string, port string) net.Conn {
+func (c Client) Start() {
+	// new design
+	go c.send()
+	go c.receive()
+
+	go c.chanTrigger()
+
+	go c.fetchDesc("宋太祖")
+}
+
+func (c Client) chanTrigger() {
+	select {
+	case <-c.msgChanMap["SetupConn"]:
+		c.connnetServer("127.0.0.1", "8000")
+	case <-c.msgChanMap["Heartbeat"]:
+		c.sendHeartBeat()
+	}
+
+}
+
+func (c Client) send() error {
+	for {
+		select {
+		case byteArr := <-c.sendChan:
+			c.conn.SetWriteDeadline(time.Now().Add(time.Second * 60))
+			n, err := c.conn.Write(byteArr)
+			if err != nil || n != len(byteArr) {
+				return err
+			}
+
+			// todo: update heartbeat timer
+		case <-c.msgChanMap["Quit"]:
+			c.stop()
+			return nil
+		}
+	}
+}
+
+func (c Client) receive() {
+	for {
+		p := packet.Packet{}
+		if err := p.ReadFromConn(c.conn); err != nil {
+			log.Println(err)
+			break
+		}
+		handler := c.handlers[p.PacketName]
+		if err := handler(p.Payload); err != nil {
+			log.Println(err)
+		}
+	}
+	// quit
+}
+
+func (c *Client) stop() {
+	c.conn.Close()
+	c.login = false
+}
+
+func (c *Client) connnetServer(ipAddr string, port string) {
 	serverAddr, err := net.ResolveTCPAddr("tcp", ipAddr+":"+port)
 	if err != nil {
 		log.Println(err)
 	}
 
-	conn, err := net.DialTCP("tcp", nil, serverAddr)
+	for i := 0; i < 3; i++ {
+		c.conn, err = net.DialTCP("tcp", nil, serverAddr)
+		if err != nil {
+			log.Println(err)
+			continue
+		} else {
+			break
+		}
+	}
 	if err != nil {
-		log.Println(err)
+		c.msgChanMap["Quit"] <- true
+		log.Println("try to connect to server faild")
+		return
 	}
 
-	return conn
-}
-
-func sendPacket(p packet.Packet, conn net.Conn) error {
-	byteArr := p.Pack()
-
-	_, err := conn.Write(byteArr)
-	if err != nil {
-		log.Println("send package err:", err)
-		conn.Close()
+	c.authenticate(c.conn)
+	if !c.login {
+		c.msgChanMap["Quit"] <- true
+		return
 	}
-	return err
 }
 
-func (c Client) Authenticate(conn net.Conn) bool {
+func (c Client) authenticate(conn net.Conn) {
 	// make package
 	name := "AuthRequest"
-	payload := &pd.AuthRequest{
-		Username: c.UserID,
-		Password: c.Passwd,
+	reqPayload := &pd.AuthRequest{
+		Username: c.user.UserID,
+		Password: c.user.Passwd,
 	}
-	payloadBytes, err := proto.Marshal(payload)
+	byteArr, err := proto.Marshal(reqPayload)
 	if err != nil {
 		log.Println(err)
 	}
+	req := packet.Packet{}
+	req.MakePacket(name, byteArr)
 
-	p := packet.Packet{0, uint8(len(name)), name, payloadBytes, 0}
-	p.PacketLen = uint32(1 + len(name) + len(payloadBytes) + 4)
-	p.Checksum = adler32.Checksum(p.Pack())
-	sendPacket(p, conn)
-
-	// wait for response
-	mode := "big"
-	packetLenByte := make([]byte, 4)
-	_, err = conn.Read(packetLenByte)
-	if err != nil {
-		log.Println(err)
-	}
-
-	packetLen := packet.Decode(packetLenByte, mode)
-
-	byteArr := make([]byte, packetLen+4)
-	copy(byteArr[:4], packetLenByte[:])
-	conn.Read(byteArr[4:])
-
-	p = packet.Packet{}
-	p.Unpack(byteArr)
-
-	checksum := p.Checksum
-	p.Checksum = uint32(0)
-	if checksum != adler32.Checksum(p.Pack()) {
-		log.Println("checksum error")
-	}
-
-	if p.PacketName != "AuthResponse" {
-		return false
-	}
-
-	res := &pd.AuthResponse{}
-	err = proto.Unmarshal(p.Payload, res)
-	if err != nil {
-		log.Println(err)
-	}
-
-	if res.Authorization {
-		log.Println("connection success as", c.UserID, ":", res.Interpration)
-	} else {
-		log.Println("connection faild as", c.UserID, ":", res.Interpration)
-		conn.Close()
-	}
-
-	return res.Authorization
+	c.sendChan <- req.Pack()
 }
 
-func sendHeartBeat(conn net.Conn) {
+func (c *Client) sendHeartBeat() {
 	name := "Heartbeat"
 	payload := make([]byte, 0)
 
 	p := packet.Packet{}
 	p.MakePacket(name, payload)
 
-	for {
-		time.Sleep(time.Second * 3)
-		err := sendPacket(p, conn)
-		log.Println("send heartbeat")
-		if err != nil {
-			log.Println("connection closed")
-			conn.Close()
-			break
-		}
-	}
+	c.sendChan <- p.Pack()
 }
 
-func handdleConn(conn net.Conn) {
-	for {
-		mode := "big"
-		packetLenByte := make([]byte, 4)
-		_, err := conn.Read(packetLenByte)
-		if err != nil {
-			log.Println("connection closed")
-			conn.Close()
-			break
-		}
-
-		packetLen := packet.Decode(packetLenByte, mode)
-
-		byteArr := make([]byte, packetLen+4)
-		copy(byteArr[:4], packetLenByte[:])
-		conn.Read(byteArr[4:])
-
-		p := packet.Packet{}
-		p.Unpack(byteArr)
-
-		handdlePacket(p, conn)
-	}
-}
-
-func handdlePacket(p packet.Packet, conn net.Conn) {
-	switch {
-	case p.PacketName == "Heartbeat":
-		{
-			log.Println("heartbeat from server")
-		}
-	case p.PacketName == "PoemRequest":
-		{
-			req := &pd.PoemRequest{}
-			err := proto.Unmarshal(p.Payload, req)
-			if err != nil {
-				log.Println(err)
-			}
-			log.Println(req)
-
-			// response
-			res := &pd.PoemResponse{
-				Title: req.Title,
-			}
-			payload, err := proto.Marshal(res)
-			if err != nil {
-				log.Println(err)
-			}
-			resPacket := packet.Packet{}
-			resPacket.MakePacket("PoemResponse", payload)
-
-			sendPacket(resPacket, conn)
-		}
-	case p.PacketName == "BiographyResponse":
-		{
-			res := &pd.BiographyResponse{}
-			proto.Unmarshal(p.Payload, res)
-			log.Println(res)
-		}
-	default:
-		{
-			log.Println("package name undefine:", p.PacketName)
-		}
-	}
-}
-
-func fetchDesc(name string, conn net.Conn) {
+func (c Client) fetchDesc(name string) {
 	req := &pd.BiographyRequest{
 		Name: name,
 	}
@@ -219,5 +182,5 @@ func fetchDesc(name string, conn net.Conn) {
 	p := packet.Packet{}
 	p.MakePacket("BiographyRequest", payload)
 
-	sendPacket(p, conn)
+	c.sendChan <- p.Pack()
 }

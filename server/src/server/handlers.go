@@ -2,24 +2,14 @@ package server
 
 import (
 	"log"
-	"net"
 	"tcpserver/packet"
 	pd "tcpserver/proto"
 
 	proto "google.golang.org/protobuf/proto"
 )
 
-type Client struct {
-	Username string
-	login    bool
-	conn     net.Conn
-	sendChan chan []byte
-	quitChan chan bool
-	handlers map[string]messageHandler
-}
-
 // packet handlers
-func (c *Client) authReqHandler(payload []byte, s Server) error {
+func (s Server) authReqHandler(payload []byte, c *Client) error {
 	// authenticat the user name and passwd
 	// add connection to map
 	req := &pd.AuthRequest{}
@@ -55,7 +45,6 @@ func (c *Client) authReqHandler(payload []byte, s Server) error {
 	resPacket := packet.Packet{}
 	resPacket.MakePacket(name, payloadBytes)
 
-	log.Println(c)
 	c.sendChan <- resPacket.Pack()
 	// save connection
 	s.msgChanMap["Login"] <- c
@@ -63,19 +52,45 @@ func (c *Client) authReqHandler(payload []byte, s Server) error {
 	return nil
 }
 
-func (c *Client) heartbeatHandler(payload []byte, s Server) error {
+func (s Server) heartbeatHandler(payload []byte, c *Client) error {
 	p := packet.Packet{}
 	p.MakePacket("Heartbeat", payload)
 	c.sendChan <- p.Pack()
-	log.Println(c)
 	return nil
 }
 
-func (c *Client) poemResHandler(payload []byte, s Server) error {
+func (s Server) poemResHandler(payload []byte, c *Client) error {
 	res := &pd.PoemResponse{}
 	err := proto.Unmarshal(payload, res)
 	if err != nil {
 		log.Println(err)
 	}
+	return err
+}
+
+func (s Server) BiogReqHandler(payload []byte, c *Client) error {
+	if !c.login {
+		return nil
+	}
+	req := &pd.BiographyRequest{}
+	err := proto.Unmarshal(payload, req)
+	if err != nil {
+		log.Println(err)
+	}
+	// log.Println("client request description for:", req.Name)
+	authors := s.data["authors"].(map[string]Author)
+
+	res := &pd.BiographyResponse{
+		Desc: authors[req.Name].Desc,
+	}
+	resPayload, err := proto.Marshal(res)
+	if err != nil {
+		log.Println(err)
+	}
+
+	resPacket := packet.Packet{}
+	resPacket.MakePacket("BiographyResponse", resPayload)
+
+	c.sendChan <- resPacket.Pack()
 	return err
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"time"
 )
 
 type Packet struct {
@@ -85,6 +86,8 @@ func (packet *Packet) MakePacket(name string, payload []byte) {
 func (packet *Packet) ReadFromConn(conn net.Conn) error {
 	mode := "big"
 	PacketLenByte := make([]byte, 4)
+	// set the deadline for one time reading
+	conn.SetReadDeadline(time.Now().Add(time.Second * 60))
 	_, err := io.ReadFull(conn, PacketLenByte)
 	if err != nil {
 		log.Println("read package", err)
@@ -95,11 +98,20 @@ func (packet *Packet) ReadFromConn(conn net.Conn) error {
 
 	byteArr := make([]byte, PacketLen+4)
 	copy(byteArr[:4], PacketLenByte[:])
+
+	// set the deadline for one time reading
+	conn.SetReadDeadline(time.Now().Add(time.Second * 60))
 	n, err := io.ReadFull(conn, byteArr[4:])
 	if err != nil || n != int(PacketLen) {
 		return errors.New("read packet error")
 	}
 
 	packet.Unpack(byteArr)
+
+	checksum := packet.Checksum
+	packet.Checksum = uint32(0)
+	if checksum != adler32.Checksum(packet.Pack()) {
+		log.Println("checksum error")
+	}
 	return nil
 }

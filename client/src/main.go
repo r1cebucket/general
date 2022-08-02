@@ -15,7 +15,9 @@ func main() {
 	// 	c := client.Client{name + index, passwd + index}
 	// 	go c.Start()
 	// }
-	c0 := client.Client{"tmpname0", "tmppasswd0"}
+	u0 := client.User{"tmpname0", "tmppasswd0"}
+	c0 := client.Client{}
+	c0.Init(u0)
 	go c0.Start()
 	// c1 := client.Client{"tmpname1", "tmppasswd1"}
 	// go c1.Start()
