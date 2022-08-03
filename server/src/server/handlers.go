@@ -28,7 +28,7 @@ func (s Server) authReqHandler(payload []byte, c *Client) error {
 		c.login = false
 		interp = "user name or password error"
 	}
-	log.Println(c.Username, interp)
+	// log.Println(c.Username, interp)
 
 	// send response
 	name := "AuthResponse"

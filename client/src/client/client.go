@@ -3,6 +3,7 @@ package client
 import (
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	pd "tcpclient/proto"
@@ -15,14 +16,17 @@ import (
 type messageHandler func([]byte) error
 
 type Client struct {
-	user  User
-	conn  net.Conn
-	login bool
+	user           User
+	conn           net.Conn
+	login          bool
+	waitConn       sync.WaitGroup
+	heartbeatTimer *time.Timer
+	quit           bool
+	localIP        string
 
 	sendChan   chan []byte
 	msgChanMap map[string]chan interface{}
 	handlers   map[string]messageHandler
-	// heartbeatTimer time.Timer
 }
 
 type User struct {
@@ -37,13 +41,16 @@ type Poem struct {
 	Title      string   `json:"title"`
 }
 
-func (c *Client) Init(u User) {
+func (c *Client) Init(u User, localIP string) {
 	c.user = u
 	c.login = false
 	c.sendChan = make(chan []byte, 10)
+	c.waitConn.Add(1)
+	c.heartbeatTimer = time.NewTimer(time.Second * 30)
+	c.localIP = localIP
+	c.quit = false
 
 	c.msgChanMap = map[string]chan interface{}{}
-	c.msgChanMap["Heartbeat"] = make(chan interface{}, 1)
 	c.msgChanMap["Quit"] = make(chan interface{}, 1)
 	c.msgChanMap["SetupConn"] = make(chan interface{}, 1)
 	c.msgChanMap["SetupConn"] <- true
@@ -56,50 +63,66 @@ func (c *Client) Init(u User) {
 	c.handlers["BiographyResponse"] = c.biogResHandler
 }
 
-func (c Client) Start() {
-	// new design
+func (c *Client) Start() {
+	go c.chanTrigger()
+
 	go c.send()
 	go c.receive()
 
-	go c.chanTrigger()
-
-	go c.fetchDesc("宋太祖")
+	// go c.fetchDesc("宋太祖")
 }
 
-func (c Client) chanTrigger() {
-	select {
-	case <-c.msgChanMap["SetupConn"]:
-		c.connnetServer("127.0.0.1", "8000")
-	case <-c.msgChanMap["Heartbeat"]:
-		c.sendHeartBeat()
-	}
-
-}
-
-func (c Client) send() error {
+func (c *Client) chanTrigger() {
 	for {
+		select {
+		case <-c.msgChanMap["SetupConn"]:
+			c.connnetServer(c.localIP)
+		case <-c.msgChanMap["Quit"]:
+			log.Println("quit")
+			c.stop()
+			return
+		case <-c.heartbeatTimer.C:
+			c.sendHeartBeat()
+		}
+
+		if c.quit {
+			break
+		}
+	}
+}
+
+func (c *Client) send() {
+	for {
+		if c.quit {
+			break
+		}
+		c.waitConn.Wait()
 		select {
 		case byteArr := <-c.sendChan:
 			c.conn.SetWriteDeadline(time.Now().Add(time.Second * 60))
 			n, err := c.conn.Write(byteArr)
 			if err != nil || n != len(byteArr) {
-				return err
+				log.Println(err)
 			}
-
-			// todo: update heartbeat timer
-		case <-c.msgChanMap["Quit"]:
-			c.stop()
-			return nil
+			c.heartbeatTimer.Reset(time.Second * 30)
 		}
 	}
 }
 
-func (c Client) receive() {
+func (c *Client) receive() {
 	for {
+		if c.quit {
+			break
+		}
+		c.waitConn.Wait()
+		// log.Println("receiving...")
 		p := packet.Packet{}
 		if err := p.ReadFromConn(c.conn); err != nil {
 			log.Println(err)
-			break
+			c.waitConn.Add(1)
+			log.Println("try to reconnect")
+			c.msgChanMap["SetupConn"] <- true
+			continue
 		}
 		handler := c.handlers[p.PacketName]
 		if err := handler(p.Payload); err != nil {
@@ -110,39 +133,47 @@ func (c Client) receive() {
 }
 
 func (c *Client) stop() {
-	c.conn.Close()
+	if c.conn != nil {
+		c.conn.Close()
+	}
 	c.login = false
+	c.quit = true
 }
 
-func (c *Client) connnetServer(ipAddr string, port string) {
-	serverAddr, err := net.ResolveTCPAddr("tcp", ipAddr+":"+port)
+func (c *Client) connnetServer(localIP string) {
+	serverAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:8000")
+	if err != nil {
+		log.Println(err)
+	}
+
+	localAddr, err := net.ResolveTCPAddr("tcp", localIP+":"+"0")
 	if err != nil {
 		log.Println(err)
 	}
 
 	for i := 0; i < 3; i++ {
-		c.conn, err = net.DialTCP("tcp", nil, serverAddr)
+		c.conn, err = net.DialTCP("tcp", localAddr, serverAddr)
 		if err != nil {
 			log.Println(err)
+			time.Sleep(time.Second * 5)
 			continue
 		} else {
+			// log.Println("connect success")
 			break
 		}
 	}
+
 	if err != nil {
 		c.msgChanMap["Quit"] <- true
 		log.Println("try to connect to server faild")
 		return
 	}
 
+	c.waitConn.Done()
 	c.authenticate(c.conn)
-	if !c.login {
-		c.msgChanMap["Quit"] <- true
-		return
-	}
 }
 
-func (c Client) authenticate(conn net.Conn) {
+func (c *Client) authenticate(conn net.Conn) {
 	// make package
 	name := "AuthRequest"
 	reqPayload := &pd.AuthRequest{
@@ -169,7 +200,7 @@ func (c *Client) sendHeartBeat() {
 	c.sendChan <- p.Pack()
 }
 
-func (c Client) fetchDesc(name string) {
+func (c *Client) fetchDesc(name string) {
 	req := &pd.BiographyRequest{
 		Name: name,
 	}

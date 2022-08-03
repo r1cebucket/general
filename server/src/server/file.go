@@ -93,15 +93,18 @@ func readFrom(path string) []byte {
 
 // log
 func (server Server) logConnNum() {
-	cnt := 0
-	for _, val := range server.clientMap {
-		if val.login {
-			cnt += 1
-		}
-	}
+	// cnt := 0
+	// for _, val := range server.clientMap {
+	// 	if val.login {
+	// 		cnt += 1
+	// 	}
+	// }
 
 	// log_str := getPortConn(s.port)
-	log_str := "port " + string(server.addr) + " TCP connection #: " + strconv.Itoa(cnt)
+	// log_str := "port " + string(server.addr) + " TCP connection #: " + strconv.Itoa(cnt)
+
+	log_str := "port " + string(server.addr) + " TCP connection #: " + strconv.Itoa(len(server.clientMap))
+
 	log.Println(log_str)
 	log_file(log_str)
 }

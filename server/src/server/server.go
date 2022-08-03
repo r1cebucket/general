@@ -54,10 +54,10 @@ type Author struct {
 
 // client todo
 func (s Server) stopClient(c Client) {
-	c.conn.Close()
 	c.login = false
-	s.clientMap[c.Username] = c
-	// log.Println("client stop", c)
+	// c.conn.Close()
+	s.msgChanMap["Login"] <- &c
+	// s.clientMap[c.Username] = c
 }
 
 func Start(port string) {
@@ -134,7 +134,7 @@ func (server *Server) chanTrigger() {
 		case connIf := <-server.msgChanMap["AcceptConn"]:
 			conn := connIf.(net.Conn)
 			server.handleConn(conn)
-		case clientIf := <-server.msgChanMap["Login"]:
+		case clientIf := <-server.msgChanMap["Login"]: // used for update the client map at server
 			c := clientIf.(*Client)
 			server.handleLogin(*c)
 		}
@@ -205,15 +205,16 @@ func (s Server) handleLogin(c Client) {
 	// add the conn
 	// if the username exist in map, renew
 	if connExist && c.login {
-		s.stopClient(clientOld)
+		// s.stopClient(clientOld)
+		clientOld.quitChan <- true
 		log.Println("connection exist, reset")
 		s.clientMap[c.Username] = c
 	} else if !connExist && c.login {
-		log.Println("new connection")
+		// log.Println("new connection")
 		s.clientMap[c.Username] = c
 	} else if !c.login {
-		s.stopClient(c)
-		log.Println("authentication error")
+		c.conn.Close()
+		delete(s.clientMap, c.Username)
 		return
 	}
 
@@ -224,7 +225,7 @@ func (s Server) handleLogin(c Client) {
 // function
 func (s Server) postPoem(c Client) {
 	// log.Println("start to post poems to client: " + c.Username)
-	ticker := time.NewTicker(time.Second * 10)
+	ticker := time.NewTicker(time.Minute * 10)
 	poems := s.data["poems"].([]Poem)
 	for range ticker.C {
 		if !c.login {

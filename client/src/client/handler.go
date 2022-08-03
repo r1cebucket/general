@@ -19,7 +19,7 @@ func (c *Client) authResHandler(payload []byte) error {
 	c.login = resPayload.Authorization
 
 	if c.login {
-		log.Println("connection success as", c.user.UserID, ":", resPayload.Interpration)
+		// log.Println("connection success as", c.user.UserID, ":", resPayload.Interpration)
 	} else {
 		log.Println("connection faild as", c.user.UserID, ":", resPayload.Interpration)
 	}
@@ -27,7 +27,7 @@ func (c *Client) authResHandler(payload []byte) error {
 }
 
 func (c Client) heartbeatHandler(payload []byte) error {
-	log.Println("heartbeat from server")
+	// log.Println("heartbeat from server")
 	return nil
 }
 
@@ -38,7 +38,7 @@ func (c Client) poemReqHandler(payload []byte) error {
 		log.Println(err)
 		return err
 	}
-	log.Println(req)
+	// log.Println(req)
 
 	// response
 	res := &pd.PoemResponse{
