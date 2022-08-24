@@ -5,6 +5,7 @@ import (
 	"lab/internal/redis"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -12,8 +13,14 @@ import (
 type WSConn struct {
 	conn        *websocket.Conn
 	closeChan   chan struct{}
-	receiveChan chan []byte
-	sendChan    chan []byte
+	receiveChan chan Message
+	sendChan    chan Message
+	once        sync.Once
+}
+
+type Message struct {
+	messageType int
+	data        []byte
 }
 
 func init() {
@@ -38,11 +45,75 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	wsConn := WSConn{
 		conn:        conn,
 		closeChan:   make(chan struct{}, 1),
-		receiveChan: make(chan []byte, 1024),
-		sendChan:    make(chan []byte, 1024),
+		receiveChan: make(chan Message, 1024),
+		sendChan:    make(chan Message, 1024),
+		once:        sync.Once{},
 	}
 
-	close(wsConn.closeChan)
+	go wsConn.receive()
+	go wsConn.send()
+	go wsConn.process()
+}
+
+func (wsConn WSConn) receive() {
+	for {
+		messageType, bytes, err := wsConn.conn.ReadMessage()
+		if err != nil {
+			log.Println(err)
+			wsConn.close()
+			log.Println("receive stop")
+			return
+		}
+		msg := Message{
+			messageType: messageType,
+			data:        bytes,
+		}
+		wsConn.receiveChan <- msg
+	}
+}
+
+func (wsConn WSConn) send() {
+	for {
+		select {
+		case msg := <-wsConn.sendChan:
+			err := wsConn.conn.WriteMessage(msg.messageType, msg.data)
+			if err != nil {
+				log.Println(err)
+			}
+		case <-wsConn.closeChan:
+			log.Println("send stop")
+			return
+		}
+	}
+}
+
+func (wsConn WSConn) process() {
+
+	for {
+		select {
+		case msg := <-wsConn.receiveChan:
+			resRedis, err := redis.Do("get", "key")
+			bytes, err := redis.String(resRedis, err)
+			if err != nil {
+				log.Println(err)
+			}
+			resMsg := Message{
+				messageType: msg.messageType,
+				data:        []byte(bytes),
+			}
+			wsConn.sendChan <- resMsg
+		case <-wsConn.closeChan:
+			log.Println("process stop")
+			return
+		}
+	}
+}
+
+func (wsConn WSConn) close() {
+	wsConn.once.Do(func() {
+		wsConn.conn.Close()
+		close(wsConn.closeChan)
+	})
 }
 
 func Start() {
